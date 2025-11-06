@@ -1,1 +1,0 @@
-This path contains old Sui fuzzer and it's not used. We will port this to libafl-sui in the future.
