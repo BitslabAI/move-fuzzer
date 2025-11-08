@@ -5,9 +5,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use aptos_fuzzer::static_analysis::run_static_analysis;
 use aptos_fuzzer::{
-    AbortCodeObjective, AptosFuzzerMutator, AptosFuzzerState, AptosMoveExecutor,
-    ShiftOverflowObjective,
+    AbortCodeObjective, AptosFuzzerMutator, AptosFuzzerState, AptosMoveExecutor, ShiftOverflowObjective,
 };
 use clap::Parser;
 use libafl::corpus::Corpus;
@@ -57,16 +57,53 @@ fn main() {
     let mut mgr = SimpleEventManager::new(mon);
     let scheduler = QueueScheduler::new();
 
-    let abi = cli
-        .abi_path
-        .clone()
-        .unwrap_or_else(|| panic!("--abi-path is required (no fallback)."));
+    let abi = cli.abi_path.clone();
     let module = cli
         .module_path
         .clone()
         .unwrap_or_else(|| panic!("--module-path is required (no fallback)."));
-    let mut state = AptosFuzzerState::new(Some(abi), Some(module));
+    let mut state = AptosFuzzerState::new(abi.clone(), Some(module));
+
+    let static_findings = run_static_analysis(state.aptos_state(), state.target_modules());
+    println!("Completed static analysis.");
+    if !static_findings.is_empty() {
+        println!("Static analysis findings:");
+        for finding in &static_findings {
+            match &finding.function {
+                Some(func) => println!(
+                    "  [{}] {}::{} - {}",
+                    finding.kind.as_str(),
+                    finding.module,
+                    func,
+                    finding.detail
+                ),
+                None => println!("  [{}] {} - {}", finding.kind.as_str(), finding.module, finding.detail),
+            }
+        }
+        println!("(Static issues reported once before fuzzing)");
+    }
+    state.set_static_findings(static_findings);
     let _ = feedback.init_state(&mut state);
+    if state.corpus().count() == 0 {
+        println!("No ABI inputs found; skipping fuzzing after static analysis.");
+        if !state.static_findings().is_empty() {
+            println!("Static analysis findings:");
+            for finding in state.static_findings() {
+                match &finding.function {
+                    Some(func) => println!(
+                        "  [{}] {}::{} - {}",
+                        finding.kind.as_str(),
+                        finding.module,
+                        func,
+                        finding.detail
+                    ),
+                    None => println!("  [{}] {} - {}", finding.kind.as_str(), finding.module, finding.detail),
+                }
+            }
+        }
+        return;
+    }
+
     let mut fuzzer = StdFuzzer::new(scheduler, feedback, objective);
 
     let mutator = AptosFuzzerMutator::default();

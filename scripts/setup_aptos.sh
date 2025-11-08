@@ -127,44 +127,48 @@ if [[ ! -d "$BUILD_DIR" ]]; then
     exit 1
 fi
 
-# Find the first .mv file in bytecode_modules (excluding dependencies)
-MODULE_FILE=$(find "$BUILD_DIR" -path "*/bytecode_modules/*.mv" -not -path "*/dependencies/*" | head -n 1)
-if [[ -z "$MODULE_FILE" ]]; then
-    echo "[-] Error: No module file found in $BUILD_DIR"
+# Find all .mv files in bytecode_modules (excluding dependencies)
+mapfile -t MODULE_FILES < <(find "$BUILD_DIR" -path "*/bytecode_modules/*.mv" -not -path "*/dependencies/*" | sort)
+if [[ ${#MODULE_FILES[@]} -eq 0 ]]; then
+    echo "[-] Error: No module files found in $BUILD_DIR"
     exit 1
 fi
-
-MODULE_PATH="$MODULE_FILE"
 
 # Find the ABI directory
 ABI_PATH=$(find "$BUILD_DIR" -type d -name "abis" -not -path "*/dependencies/*" | head -n 1)
 if [[ -z "$ABI_PATH" ]]; then
-    echo "[-] Error: No ABI directory found in $BUILD_DIR"
-    exit 1
+    echo "[-] Warning: No ABI directory found in $BUILD_DIR; fuzzing will be skipped."
 fi
 
-echo "[*] Module path: $MODULE_PATH"
-echo "[*] ABI path: $ABI_PATH"
+echo "[*] Found ${#MODULE_FILES[@]} module(s)" 
+echo "[*] ABI path: ${ABI_PATH:-<none>}"
 
-# Verify the paths exist
-if [[ ! -f "$MODULE_PATH" ]]; then
-    echo "[-] Error: Module file not found at: $MODULE_PATH"
-    exit 1
+# Verify ABI path exists when provided
+if [[ -n "$ABI_PATH" && ! -d "$ABI_PATH" ]]; then
+    echo "[-] Warning: ABI directory path $ABI_PATH is not accessible; skipping fuzzing."
+    ABI_PATH=""
 fi
 
-if [[ ! -d "$ABI_PATH" ]]; then
-    echo "[-] Error: ABI directory not found at: $ABI_PATH"
-    exit 1
-fi
-
-echo "[+] Step 4: Running libafl-aptos fuzzer..."
+echo "[+] Step 4: Running libafl-aptos fuzzer for each module..."
 cd "$PROJECT_ROOT"
 
-echo "[*] Running command:"
-echo "[*] $LIBAFL_APTOS_BIN --module-path \"$MODULE_PATH\" --abi-path \"$ABI_PATH\" --timeout $TIMEOUT_DURATION"
+for MODULE_PATH in "${MODULE_FILES[@]}"; do
+    if [[ ! -f "$MODULE_PATH" ]]; then
+        echo "[-] Warning: Skipping missing module file $MODULE_PATH"
+        continue
+    fi
+
+    echo ""
+    echo "[*] Fuzzing module: $MODULE_PATH"
+
+    if [[ -z "$ABI_PATH" ]]; then
+        echo "[*] Command: $LIBAFL_APTOS_BIN --module-path \"$MODULE_PATH\" --timeout $TIMEOUT_DURATION"
+        "$LIBAFL_APTOS_BIN" --module-path "$MODULE_PATH" --timeout "$TIMEOUT_DURATION"
+    else
+        echo "[*] Command: $LIBAFL_APTOS_BIN --module-path \"$MODULE_PATH\" --abi-path \"$ABI_PATH\" --timeout $TIMEOUT_DURATION"
+        "$LIBAFL_APTOS_BIN" --module-path "$MODULE_PATH" --abi-path "$ABI_PATH" --timeout "$TIMEOUT_DURATION"
+    fi
+done
+
 echo ""
-
-# Run the fuzzer with built-in timeout support
-"$LIBAFL_APTOS_BIN" --module-path "$MODULE_PATH" --abi-path "$ABI_PATH" --timeout "$TIMEOUT_DURATION"
-
-echo "[+] Fuzzing completed"
+echo "[+] Fuzzing completed for all modules"

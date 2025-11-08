@@ -630,6 +630,10 @@ impl AptosCustomState {
         self.kv_state.insert(state_key, StateValue::new_legacy(bytes));
     }
 
+    pub fn module_bytes(&self) -> &HashMap<ModuleId, Bytes> {
+        &self.modules
+    }
+
     // Calculate total bytecode instructions across all modules
     pub fn total_bytecode_instructions(&self) -> usize {
         let mut total = 0;

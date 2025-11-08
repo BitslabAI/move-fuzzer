@@ -24,6 +24,11 @@ aptos-move-vm-runtime = { workspace = true }
 aptos-native-interface = { workspace = true }
 aptos-gas-schedule = { workspace = true }
 aptos-cached-packages = { path = "../../external/aptos-core/aptos-move/framework/cached-packages" }
+move-model = { path = "../../external/aptos-core/third_party/move/move-model" }
+move-stackless-bytecode = { path = "../../external/aptos-core/third_party/move/move-model/bytecode" }
+move-bytecode-source-map = { path = "../../external/aptos-core/third_party/move/move-ir-compiler/move-bytecode-source-map" }
+move-ir-types = { path = "../../external/aptos-core/third_party/move/move-ir/types" }
+move-command-line-common = { path = "../../external/aptos-core/third_party/move/move-command-line-common" }
 bytes = { workspace = true }
 
 libafl = { workspace = true }
@@ -33,3 +38,5 @@ serde_yaml = "0.9"
 bcs = { workspace = true }
 dashmap = { workspace = true }
 anyhow = { workspace = true }
+log = "0.4"
+z3 = "0.16.2"

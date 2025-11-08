@@ -1,0 +1,14 @@
+[package]
+name = "nftango"
+version = "1.0.0"
+
+[addresses]
+std = "0x1"
+aptos_framework = "0x1"
+aptos_token = "0x3"
+overmind = "0x1337"
+
+[dependencies]
+MoveStdlib = { git = "https://github.com/aptos-labs/aptos-core.git", subdir = "aptos-move/framework/move-stdlib", rev = "mainnet" }
+AptosFramework = { git = "https://github.com/aptos-labs/aptos-core.git", subdir = "aptos-move/framework/aptos-framework", rev = "mainnet" }
+AptosToken = { git = "https://github.com/aptos-labs/aptos-core.git", subdir = "aptos-move/framework/aptos-token/", rev = "mainnet" }

@@ -1,0 +1,12 @@
+[package]
+name = 'LendConfig'
+version = '1.0.0'
+
+ [dependencies.AptosFramework]
+ git = 'https://github.com/aptos-labs/aptos-core.git'
+ rev = 'mainnet'
+ subdir = 'aptos-move/framework/aptos-framework'
+
+
+[addresses]
+lend_config='0xffffb916d592f01cf27be4c99a8a6c1fc82c4400a5f0514fcf1568e35f53e167'

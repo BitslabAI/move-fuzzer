@@ -20,8 +20,10 @@ use libafl::{HasMetadata, HasNamedMetadata};
 use libafl_bolts::rands::StdRand;
 use libafl_bolts::serdeany::{NamedSerdeAnyMap, SerdeAnyMap};
 
+use crate::concolic::RuntimeIssue;
 use crate::executor::aptos_custom_state::AptosCustomState;
 use crate::input::AptosFuzzerInput;
+use crate::static_analysis::StaticAnalysisFinding;
 
 // AFL-style map size constant
 pub const MAP_SIZE: usize = 1 << 16;
@@ -72,6 +74,11 @@ pub struct AptosFuzzerState {
     pub abort_code_paths: HashSet<u64>,
     /// Execution path IDs that triggered shift overflow objectives
     pub shift_overflow_paths: HashSet<u64>,
+    /// Modules explicitly loaded for fuzzing
+    target_modules: Vec<ModuleId>,
+    /// Static analysis findings discovered before fuzzing
+    static_findings: Vec<StaticAnalysisFinding>,
+    last_runtime_issues: Vec<RuntimeIssue>,
 }
 
 #[derive(Clone)]
@@ -107,10 +114,14 @@ impl AptosFuzzerState {
             stop_requested: false,
             stage_stack: StageStack::default(),
             cumulative_coverage: vec![0u8; MAP_SIZE],
+            target_modules: Vec::new(),
+            static_findings: Vec::new(),
+            last_runtime_issues: Vec::new(),
         };
 
         if let Some((module_id, code)) = module_bytes {
-            state.aptos_state.deploy_module_bytes(module_id, code);
+            state.aptos_state.deploy_module_bytes(module_id.clone(), code);
+            state.target_modules.push(module_id);
         }
 
         for payload in Self::padding_abis(entry_abis) {
@@ -186,6 +197,14 @@ impl AptosFuzzerState {
         self.current_execution_path_id
     }
 
+    pub fn set_last_runtime_issues(&mut self, issues: Vec<RuntimeIssue>) {
+        self.last_runtime_issues = issues;
+    }
+
+    pub fn last_runtime_issues(&self) -> &[RuntimeIssue] {
+        &self.last_runtime_issues
+    }
+
     pub fn record_current_execution_path_for(&mut self, input: &AptosFuzzerInput) -> Option<u64> {
         match (self.current_execution_path_id, self.current_execution_path.as_ref()) {
             (Some(id), Some(path)) => {
@@ -223,6 +242,18 @@ impl AptosFuzzerState {
             let hash = hash ^ (*value as u64);
             hash.wrapping_mul(FNV_PRIME)
         })
+    }
+
+    pub fn target_modules(&self) -> &[ModuleId] {
+        &self.target_modules
+    }
+
+    pub fn set_static_findings(&mut self, findings: Vec<StaticAnalysisFinding>) {
+        self.static_findings = findings;
+    }
+
+    pub fn static_findings(&self) -> &[StaticAnalysisFinding] {
+        &self.static_findings
     }
 }
 

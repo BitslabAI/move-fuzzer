@@ -9,7 +9,9 @@ use libafl::observers::map::{HitcountsMapObserver, OwnedMapObserver};
 use libafl::state::HasExecutions;
 use libafl_bolts::tuples::RefIndexable;
 use libafl_bolts::AsSliceMut;
+use log::warn;
 
+use crate::concolic::{RuntimeIssue, SymbolicMoveTracer};
 use crate::executor::aptos_custom_state::AptosCustomState;
 use crate::executor::custom_state_view::CustomStateView;
 use crate::executor::types::TransactionResult;
@@ -31,10 +33,13 @@ pub struct AptosMoveExecutor<EM, Z> {
     observers: AptosObservers,
     prev_loc: u32,
     total_instructions_executed: u64,
+    symbolic_tracer: SymbolicMoveTracer,
+    pending_runtime_issues: Vec<RuntimeIssue>,
 }
 
 impl<EM, Z> AptosMoveExecutor<EM, Z> {
     pub fn new() -> Self {
+        AptosVM::set_concurrency_level_once(1);
         let env = super::aptos_custom_state::AptosCustomState::default_env();
         let edges = OwnedMapObserver::new("edges", vec![0u8; MAP_SIZE]);
         let edges = HitcountsMapObserver::new(edges);
@@ -48,6 +53,8 @@ impl<EM, Z> AptosMoveExecutor<EM, Z> {
             observers: (edges, (abort_obs, (shift_obs, ()))),
             prev_loc: 0,
             total_instructions_executed: 0,
+            symbolic_tracer: SymbolicMoveTracer::new(),
+            pending_runtime_issues: Vec::new(),
         }
     }
 
@@ -90,9 +97,15 @@ impl<EM, Z> AptosMoveExecutor<EM, Z> {
                 let code_storage =
                     aptos_vm_types::module_and_script_storage::AsAptosCodeStorage::as_aptos_code_storage(&view, state);
 
-                let (result, pcs, shifts, outcome) =
-                    self.aptos_vm
-                        .execute_user_payload_no_checking(state, &code_storage, &transaction, sender);
+                self.symbolic_tracer.reset();
+                let (result, pcs, shifts, outcome) = self.aptos_vm.execute_user_payload_no_checking_with_tracer(
+                    state,
+                    &code_storage,
+                    &transaction,
+                    sender,
+                    &mut self.symbolic_tracer,
+                );
+                self.pending_runtime_issues = self.symbolic_tracer.take_issues();
                 let shift_losses: Vec<bool> = shifts.iter().map(|ev| ev.lost_high_bits).collect();
 
                 let res = match result {
@@ -109,16 +122,19 @@ impl<EM, Z> AptosMoveExecutor<EM, Z> {
                 };
                 (res, outcome, pcs, shift_losses)
             }
-            _ => (
-                Err(VMStatus::Error {
-                    status_code: StatusCode::UNKNOWN_STATUS,
-                    sub_status: None,
-                    message: Some("Unsupported payload type for this executor".to_string()),
-                }),
-                ExecOutcomeKind::OtherError,
-                Vec::new(),
-                Vec::new(),
-            ),
+            _ => {
+                self.pending_runtime_issues.clear();
+                (
+                    Err(VMStatus::Error {
+                        status_code: StatusCode::UNKNOWN_STATUS,
+                        sub_status: None,
+                        message: Some("Unsupported payload type for this executor".to_string()),
+                    }),
+                    ExecOutcomeKind::OtherError,
+                    Vec::new(),
+                    Vec::new(),
+                )
+            }
         }
     }
 }
@@ -140,6 +156,17 @@ impl<EM, Z> Executor<EM, AptosFuzzerInput, AptosFuzzerState, Z> for AptosMoveExe
         state.clear_current_execution_path();
         let (result, outcome, pcs, shift_losses) =
             self.execute_transaction(input.payload().clone(), state.aptos_state(), None);
+        let runtime_issues = std::mem::take(&mut self.pending_runtime_issues);
+        let has_runtime_issue = !runtime_issues.is_empty();
+        if has_runtime_issue {
+            for issue in &runtime_issues {
+                warn!(
+                    "Runtime issue detected: {} ({}::{} @ pc {})",
+                    issue.message, issue.module, issue.function, issue.pc
+                );
+            }
+        }
+        state.set_last_runtime_issues(runtime_issues);
 
         // Update execution counter (required by Executor trait contract)
         *state.executions_mut() += 1;
@@ -192,7 +219,11 @@ impl<EM, Z> Executor<EM, AptosFuzzerInput, AptosFuzzerState, Z> for AptosMoveExe
                     self.observers.1 .0.set_last(None);
                 }
 
-                Ok(ExitKind::Ok)
+                let mut exit_kind = ExitKind::Ok;
+                if has_runtime_issue {
+                    exit_kind = ExitKind::Crash;
+                }
+                return Ok(exit_kind);
             }
             Err(vm_status) => {
                 self.error_count += 1;
@@ -208,7 +239,7 @@ impl<EM, Z> Executor<EM, AptosFuzzerInput, AptosFuzzerState, Z> for AptosMoveExe
                 } else {
                     self.observers.1 .0.set_last(None);
                 }
-                let exit_kind = match outcome {
+                let mut exit_kind = match outcome {
                     ExecOutcomeKind::Ok => ExitKind::Ok,
                     ExecOutcomeKind::MoveAbort(_) => ExitKind::Ok,
                     ExecOutcomeKind::OutOfGas => ExitKind::Ok,
@@ -216,7 +247,10 @@ impl<EM, Z> Executor<EM, AptosFuzzerInput, AptosFuzzerState, Z> for AptosMoveExe
                     ExecOutcomeKind::InvariantViolation => ExitKind::Crash,
                     ExecOutcomeKind::Panic => ExitKind::Crash,
                 };
-                Ok(exit_kind)
+                if has_runtime_issue {
+                    exit_kind = ExitKind::Crash;
+                }
+                return Ok(exit_kind);
             }
         }
     }

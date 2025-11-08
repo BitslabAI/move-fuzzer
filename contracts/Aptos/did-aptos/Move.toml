@@ -1,0 +1,16 @@
+[package]
+name = "did"
+version = "0.1.0"
+# https://aptos.dev/guides/move-guides/upgrading-move-code/
+upgrade_policy = "compatible"
+
+[addresses]
+my_addr = "0x3"
+std = "0x1"
+aptos_framework = "0x1"
+chain_id = "0x1" # for mainnet
+# chain_id = "0x2" # for testnet
+
+[dependencies]
+MoveStdlib = { git = "https://github.com/aptos-labs/aptos-core.git", subdir="aptos-move/framework/move-stdlib/", rev="mainnet" }
+AptosFramework = { git = "https://github.com/aptos-labs/aptos-core.git", subdir="aptos-move/framework/aptos-framework/", rev="mainnet" }

@@ -905,13 +905,20 @@ dependencies = [
  "dashmap 6.1.0",
  "libafl",
  "libafl_bolts",
+ "log",
  "move-binary-format",
+ "move-bytecode-source-map",
+ "move-command-line-common",
  "move-core-types",
+ "move-ir-types",
+ "move-model",
+ "move-stackless-bytecode",
  "move-table-extension",
  "move-vm-runtime",
  "move-vm-types",
  "serde",
  "serde_yaml 0.9.34+deprecated",
+ "z3",
 ]
 
 [[package]]
@@ -11460,6 +11467,27 @@ dependencies = [
  "quote",
  "syn 2.0.106",
  "synstructure",
+]
+
+[[package]]
+name = "z3"
+version = "0.16.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39c595f59bb8d2e0314a5ed34d0c14c262e7af153472cc23eb3d0fd69da3ea6d"
+dependencies = [
+ "log",
+ "num 0.4.3",
+ "z3-sys",
+]
+
+[[package]]
+name = "z3-sys"
+version = "0.9.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cd1b38ffd95fae0fcc40026fb1a822074e2a923ad4e011e90df878cbed721e0"
+dependencies = [
+ "bindgen",
+ "pkg-config",
 ]
 
 [[package]]

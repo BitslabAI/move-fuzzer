@@ -1,0 +1,23 @@
+[package]
+name = 'SeamDao'
+version = '0.2.2'
+
+[addresses]
+std = '0x1'
+token = '0x3'
+seam = "0x999"
+
+
+## protocol Integrations
+## anime = '0x16fe2df00ea7dde4a63409201f7f4e536bde7bb7335526a35d05111e68aa322c'
+## liquid = '0x43417434fd869edee76cca2a4d2301e528a1551b1d719b75c350c3c97d15b8b9'
+
+
+[dependencies]
+
+
+[dependencies.AptosFramework]
+git = "https://github.com/aptos-labs/aptos-core.git"
+rev = "mainnet"
+subdir = "aptos-move/framework/aptos-framework"
+

@@ -1,0 +1,11 @@
+[package]
+name = "MEME"
+version = "0.0.0"
+
+[addresses]
+MEME = "0x999"
+admin_account="0x9999"
+
+
+[dependencies]
+AptosFramework = { git = "https://github.com/aptos-labs/aptos-core.git", subdir="aptos-move/framework/aptos-framework/", rev="mainnet" }
