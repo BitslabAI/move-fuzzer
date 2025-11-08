@@ -32,7 +32,7 @@ pub struct AptosMoveExecutor<EM, Z> {
     success_count: u64,
     error_count: u64,
     observers: AptosObservers,
-    prev_loc: u32,
+    prev_loc: u64,
     total_instructions_executed: u64,
     symbolic_tracer: SymbolicMoveTracer,
     pending_runtime_issues: Vec<RuntimeIssue>,
@@ -74,6 +74,17 @@ impl<EM, Z> AptosMoveExecutor<EM, Z> {
         hash
     }
 
+    #[inline]
+    fn hash64(bytes: &[u8]) -> u64 {
+        // FNV-1a hash
+        let mut hash: u64 = 0xCBF29CE484222325;
+        for &b in bytes {
+            hash ^= b as u64;
+            hash = hash.wrapping_mul(0x100000001B3);
+        }
+        hash
+    }
+
     pub fn pc_observer(&self) -> &HitcountsMapObserver<OwnedMapObserver<u8>> {
         &self.observers.0
     }
@@ -89,7 +100,7 @@ impl<EM, Z> AptosMoveExecutor<EM, Z> {
     ) -> (
         core::result::Result<TransactionResult, VMStatus>,
         ExecOutcomeKind,
-        Vec<u32>,
+        Vec<u64>,
         Vec<bool>,
     ) {
         match &transaction {
@@ -184,16 +195,16 @@ impl<EM, Z> Executor<EM, AptosFuzzerInput, AptosFuzzerState, Z> for AptosMoveExe
                 self.prev_loc = 0;
 
                 // Build stable per-function base ID
-                let base_id: u32 = match input.payload() {
+                let base_id: u64 = match input.payload() {
                     TransactionPayload::EntryFunction(ef) => {
                         let (module, function, _ty_args, _args) = ef.clone().into_inner();
                         let mut buf = Vec::new();
                         buf.extend_from_slice(module.address().as_ref());
                         buf.extend_from_slice(module.name().as_str().as_bytes());
                         buf.extend_from_slice(function.as_str().as_bytes());
-                        Self::hash32(&buf)
+                        Self::hash64(&buf)
                     }
-                    TransactionPayload::Script(script) => Self::hash32(script.code()),
+                    TransactionPayload::Script(script) => Self::hash64(script.code()),
                     _ => 0,
                 };
 

@@ -46,7 +46,7 @@ pub struct AptosFuzzerState {
     /// Solution corpus
     solutions: InMemoryCorpus<AptosFuzzerInput>,
     /// Execution path captured during the most recent run
-    current_execution_path: Option<Vec<u32>>,
+    current_execution_path: Option<Vec<u64>>,
     current_execution_path_id: Option<u64>,
     /// Execution paths recorded for interesting inputs
     execution_paths_by_input: HashMap<AptosFuzzerInput, ExecutionPathRecord>,
@@ -91,7 +91,7 @@ pub struct AptosFuzzerState {
 #[derive(Clone)]
 struct ExecutionPathRecord {
     id: u64,
-    path: Vec<u32>,
+    path: Vec<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -255,7 +255,7 @@ impl AptosFuzzerState {
         self.current_execution_path_id = None;
     }
 
-    pub fn set_current_execution_path(&mut self, execution_path: Vec<u32>) {
+    pub fn set_current_execution_path(&mut self, execution_path: Vec<u64>) {
         let id = Self::compute_execution_path_id(&execution_path);
         self.current_execution_path = Some(execution_path);
         self.current_execution_path_id = Some(id);
@@ -293,7 +293,7 @@ impl AptosFuzzerState {
         self.seen_execution_paths.contains(&path_id)
     }
 
-    pub fn get_solution_execution_path(&self, input: &AptosFuzzerInput) -> Option<Vec<u32>> {
+    pub fn get_solution_execution_path(&self, input: &AptosFuzzerInput) -> Option<Vec<u64>> {
         self.execution_paths_by_input
             .get(input)
             .map(|record| record.path.clone())
@@ -303,11 +303,11 @@ impl AptosFuzzerState {
         self.execution_paths_by_input.get(input).map(|record| record.id)
     }
 
-    pub fn compute_execution_path_id(execution_path: &[u32]) -> u64 {
+    pub fn compute_execution_path_id(execution_path: &[u64]) -> u64 {
         const FNV_OFFSET: u64 = 0xcbf29ce484222325;
         const FNV_PRIME: u64 = 0x100000001b3;
         execution_path.iter().fold(FNV_OFFSET, |hash, value| {
-            let hash = hash ^ (*value as u64);
+            let hash = hash ^ *value;
             hash.wrapping_mul(FNV_PRIME)
         })
     }
