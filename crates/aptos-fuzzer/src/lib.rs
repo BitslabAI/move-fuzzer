@@ -4,6 +4,7 @@ pub mod feedback;
 pub mod input;
 pub mod mutator;
 pub mod observers;
+pub mod script_sequence;
 pub mod state;
 pub mod static_analysis;
 

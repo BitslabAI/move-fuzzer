@@ -25,13 +25,10 @@ use utils::print_fuzzer_stats;
 #[derive(Debug, Parser)]
 #[command(author, version, about = "LibAFL-based fuzzer for Aptos Move modules")]
 struct Cli {
-    /// Path to an ABI file or directory to seed initial inputs
-    #[arg(long = "abi-path", value_name = "ABI_PATH")]
-    abi_path: Option<PathBuf>,
-
-    /// Path to a compiled Move module to publish before fuzzing
-    #[arg(long = "module-path", value_name = "MODULE_PATH")]
-    module_path: Option<PathBuf>,
+    /// Path to a directory containing compiled Move modules to publish before
+    /// fuzzing
+    #[arg(long = "modules-dir", value_name = "MODULES_DIR")]
+    modules_dir: PathBuf,
 
     /// Timeout in seconds (0 = no timeout, run indefinitely)
     #[arg(long = "timeout", short = 't', default_value = "0")]
@@ -57,12 +54,7 @@ fn main() {
     let mut mgr = SimpleEventManager::new(mon);
     let scheduler = QueueScheduler::new();
 
-    let abi = cli.abi_path.clone();
-    let module = cli
-        .module_path
-        .clone()
-        .unwrap_or_else(|| panic!("--module-path is required (no fallback)."));
-    let mut state = AptosFuzzerState::new(abi.clone(), Some(module));
+    let mut state = AptosFuzzerState::new(cli.modules_dir.clone());
 
     let static_findings = run_static_analysis(state.aptos_state(), state.target_modules());
     println!("Completed static analysis.");
@@ -85,7 +77,7 @@ fn main() {
     state.set_static_findings(static_findings);
     let _ = feedback.init_state(&mut state);
     if state.corpus().count() == 0 {
-        println!("No ABI inputs found; skipping fuzzing after static analysis.");
+        println!("No fuzz inputs discovered from the provided modules; skipping fuzzing after static analysis.");
         if !state.static_findings().is_empty() {
             println!("Static analysis findings:");
             for finding in state.static_findings() {

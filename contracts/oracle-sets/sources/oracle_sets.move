@@ -3,18 +3,18 @@
 
 module oracle_sets::oracle_sets {
     
-    // public entry fun test_precision_loss(account: &signer, a: u64, b: u64) {
-    //     let c = a / b; // Precision loss here
-    //     let d = c;
-    //     let e = d * 10;
-    //     e;
-    // }
-
-    public entry fun test_bool_judgement(account: &signer, x: u8) {
-        let is_equal = x == 0;
-        let y = get_bool();
-        is_equal == !y; // Redundant comparison
+    public fun test_precision_loss(a: u64, b: u64): u64 {
+        let c = a / b; // Precision loss here
+        let d = c;
+        let e = d * 10;
+        e
     }
+
+    // public fun test_bool_judgement(x: u8): bool {
+    //     let is_equal = x == 0;
+    //     let y = get_bool();
+    //     is_equal == !y // Redundant comparison
+    // }
 
     fun get_bool(): bool {
         false

@@ -24,6 +24,7 @@ aptos-move-vm-runtime = { workspace = true }
 aptos-native-interface = { workspace = true }
 aptos-gas-schedule = { workspace = true }
 aptos-cached-packages = { path = "../../external/aptos-core/aptos-move/framework/cached-packages" }
+aptos-dynamic-transaction-composer = { path = "../../external/aptos-core/aptos-move/script-composer" }
 move-model = { path = "../../external/aptos-core/third_party/move/move-model" }
 move-stackless-bytecode = { path = "../../external/aptos-core/third_party/move/move-model/bytecode" }
 move-bytecode-source-map = { path = "../../external/aptos-core/third_party/move/move-ir-compiler/move-bytecode-source-map" }

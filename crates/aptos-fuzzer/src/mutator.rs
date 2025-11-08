@@ -1,5 +1,7 @@
 use std::borrow::Cow;
+use std::cmp;
 
+use aptos_move_core_types::language_storage::TypeTag;
 use aptos_types::transaction::{EntryFunction, Script, TransactionArgument, TransactionPayload};
 use libafl::mutators::{MutationResult, Mutator};
 use libafl::state::HasRand;
@@ -7,7 +9,8 @@ use libafl_bolts::rands::Rand;
 use libafl_bolts::Named;
 
 use crate::input::AptosFuzzerInput;
-use crate::state::AptosFuzzerState;
+use crate::script_sequence::{compile_sequence, ScriptSequence, SequenceArgument, SequenceCall};
+use crate::state::{AptosFuzzerState, FunctionParameter, PublicFunctionTarget};
 
 #[derive(Default)]
 pub struct AptosFuzzerMutator {}
@@ -158,6 +161,88 @@ impl AptosFuzzerMutator {
             }
         }
     }
+
+    fn mutate_sequence(state: &mut AptosFuzzerState, input: &mut AptosFuzzerInput) -> bool {
+        let base_sequence = input.script_sequence().cloned().unwrap_or_else(ScriptSequence::new);
+        let available_values = Self::collect_available_values(&base_sequence, state);
+        let function_count = state.public_functions().len();
+        if function_count == 0 {
+            return false;
+        }
+
+        let attempts = cmp::min(8, function_count);
+        for _ in 0..attempts {
+            let idx = (state.rand_mut().next() as usize) % function_count;
+            let function = state.public_functions()[idx].clone();
+            let Some(call) = Self::build_sequence_call(&function, &available_values, state) else {
+                continue;
+            };
+            let mut new_sequence = base_sequence.clone();
+            new_sequence.push_call(call);
+            if let Some(mut script) = compile_sequence(&new_sequence, state.aptos_state().module_bytes()) {
+                Self::mutate_script_args(&mut script, state);
+                *input.payload_mut() = TransactionPayload::Script(script);
+                input.set_script_sequence(Some(new_sequence));
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn collect_available_values(sequence: &ScriptSequence, state: &AptosFuzzerState) -> Vec<AvailableValue> {
+        let mut values = Vec::new();
+        for (call_idx, call) in sequence.calls().iter().enumerate() {
+            if let Some(function) = state.public_function(call.module(), call.function()) {
+                for (return_idx, ty) in function.return_types().iter().enumerate() {
+                    values.push(AvailableValue {
+                        call_idx: call_idx as u16,
+                        return_idx: return_idx as u16,
+                        ty: ty.clone(),
+                    });
+                }
+            }
+        }
+        values
+    }
+
+    fn build_sequence_call(
+        function: &PublicFunctionTarget,
+        available_values: &[AvailableValue],
+        state: &mut AptosFuzzerState,
+    ) -> Option<SequenceCall> {
+        let mut args = Vec::new();
+        for param in function.parameters() {
+            match param {
+                FunctionParameter::Signer => {
+                    return None;
+                }
+                FunctionParameter::Value(tag) => {
+                    let matches: Vec<&AvailableValue> =
+                        available_values.iter().filter(|value| value.ty == *tag).collect();
+                    let use_previous = !matches.is_empty() && (state.rand_mut().next() & 1) == 0;
+                    if use_previous {
+                        let index = (state.rand_mut().next() as usize) % matches.len();
+                        let value = matches[index];
+                        args.push(SequenceArgument::PreviousResult {
+                            call_idx: value.call_idx,
+                            return_idx: value.return_idx,
+                        });
+                    } else {
+                        let bytes = AptosFuzzerState::default_arg_bytes(tag)?;
+                        args.push(SequenceArgument::Raw { bytes, ty: tag.clone() });
+                    }
+                }
+            }
+        }
+
+        Some(SequenceCall::new(
+            function.module_id().clone(),
+            function.name().clone(),
+            Vec::new(),
+            args,
+        ))
+    }
 }
 
 impl Mutator<AptosFuzzerInput, AptosFuzzerState> for AptosFuzzerMutator {
@@ -166,11 +251,12 @@ impl Mutator<AptosFuzzerInput, AptosFuzzerState> for AptosFuzzerMutator {
         state: &mut AptosFuzzerState,
         input: &mut AptosFuzzerInput,
     ) -> Result<MutationResult, libafl::Error> {
-        let payload = input.payload_mut();
-        let mutated = match payload {
-            TransactionPayload::EntryFunction(entry_func) => Self::mutate_entry_function_args(entry_func, state),
-            TransactionPayload::Script(script) => Self::mutate_script_args(script, state),
-            _ => false, // Other payload types not supported for current mutator
+        let mutated = match input.payload() {
+            TransactionPayload::Script(_) => Self::mutate_sequence(state, input),
+            _ => match input.payload_mut() {
+                TransactionPayload::EntryFunction(entry_func) => Self::mutate_entry_function_args(entry_func, state),
+                _ => false,
+            },
         };
 
         if mutated {
@@ -194,4 +280,11 @@ impl Named for AptosFuzzerMutator {
         static NAME: Cow<'static, str> = Cow::Borrowed("AptosFuzzerMutator");
         &NAME
     }
+}
+
+#[derive(Clone)]
+struct AvailableValue {
+    call_idx: u16,
+    return_idx: u16,
+    ty: TypeTag,
 }

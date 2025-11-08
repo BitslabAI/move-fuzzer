@@ -1,15 +1,17 @@
 use std::cell::{Ref, RefMut};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
+use aptos_move_binary_format::access::ModuleAccess;
+use aptos_move_binary_format::file_format::{SignatureToken, StructHandleIndex, Visibility};
 use aptos_move_binary_format::CompiledModule;
 use aptos_move_core_types::account_address::AccountAddress;
 use aptos_move_core_types::identifier::Identifier;
-use aptos_move_core_types::language_storage::{ModuleId, TypeTag};
+use aptos_move_core_types::language_storage::{ModuleId, StructTag, TypeTag};
 use aptos_move_core_types::u256::U256;
-use aptos_types::transaction::{EntryABI, EntryFunction as AptosEntryFunction, EntryFunctionABI, TransactionPayload};
+use aptos_types::transaction::{EntryFunction as AptosEntryFunction, TransactionPayload};
 use libafl::corpus::{Corpus, CorpusId, HasCurrentCorpusId, HasTestcase, InMemoryCorpus, Testcase};
 use libafl::stages::StageId;
 use libafl::state::{
@@ -23,6 +25,7 @@ use libafl_bolts::serdeany::{NamedSerdeAnyMap, SerdeAnyMap};
 use crate::concolic::RuntimeIssue;
 use crate::executor::aptos_custom_state::AptosCustomState;
 use crate::input::AptosFuzzerInput;
+use crate::script_sequence::{compile_sequence, ScriptSequence};
 use crate::static_analysis::StaticAnalysisFinding;
 
 // AFL-style map size constant
@@ -79,6 +82,10 @@ pub struct AptosFuzzerState {
     /// Static analysis findings discovered before fuzzing
     static_findings: Vec<StaticAnalysisFinding>,
     last_runtime_issues: Vec<RuntimeIssue>,
+    /// Public functions discovered from loaded modules
+    public_functions: Vec<PublicFunctionTarget>,
+    /// Lookup table for module::function -> public function index
+    function_lookup: HashMap<String, usize>,
 }
 
 #[derive(Clone)]
@@ -87,10 +94,52 @@ struct ExecutionPathRecord {
     path: Vec<u32>,
 }
 
+#[derive(Clone, Debug)]
+pub struct PublicFunctionTarget {
+    module_id: ModuleId,
+    name: Identifier,
+    parameters: Vec<FunctionParameter>,
+    return_types: Vec<TypeTag>,
+    is_entry: bool,
+}
+
+impl PublicFunctionTarget {
+    pub fn module_id(&self) -> &ModuleId {
+        &self.module_id
+    }
+
+    pub fn name(&self) -> &Identifier {
+        &self.name
+    }
+
+    pub fn parameters(&self) -> &[FunctionParameter] {
+        &self.parameters
+    }
+
+    pub fn return_types(&self) -> &[TypeTag] {
+        &self.return_types
+    }
+
+    pub fn is_entry(&self) -> bool {
+        self.is_entry
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FunctionParameter {
+    Signer,
+    Value(TypeTag),
+}
+
+struct LoadedModule {
+    module_id: ModuleId,
+    module: CompiledModule,
+    bytes: Vec<u8>,
+}
+
 impl AptosFuzzerState {
-    pub fn new(abi_path: Option<PathBuf>, module_path: Option<PathBuf>) -> Self {
-        let entry_abis = Self::load_abis_from_path(abi_path);
-        let module_bytes = Self::load_module_from_path(module_path);
+    pub fn new(modules_dir: PathBuf) -> Self {
+        let loaded_modules = Self::load_modules_from_path(&modules_dir);
         let mut state = Self {
             // TODO: replace me with actual aptos state
             aptos_state: AptosCustomState::new_default(),
@@ -117,18 +166,37 @@ impl AptosFuzzerState {
             target_modules: Vec::new(),
             static_findings: Vec::new(),
             last_runtime_issues: Vec::new(),
+            public_functions: Vec::new(),
+            function_lookup: HashMap::new(),
         };
 
-        if let Some((module_id, code)) = module_bytes {
-            state.aptos_state.deploy_module_bytes(module_id.clone(), code);
-            state.target_modules.push(module_id);
+        let mut entry_payloads = Vec::new();
+        for loaded in loaded_modules {
+            state
+                .aptos_state
+                .deploy_module_bytes(loaded.module_id.clone(), loaded.bytes);
+            state.target_modules.push(loaded.module_id.clone());
+
+            for function in Self::extract_public_functions(&loaded.module_id, &loaded.module) {
+                if function.is_entry() {
+                    if let Some(payload) = Self::entry_payload_from_function(&function) {
+                        entry_payloads.push(payload);
+                    }
+                }
+                let key = Self::function_key(function.module_id(), function.name());
+                state.function_lookup.insert(key, state.public_functions.len());
+                state.public_functions.push(function);
+            }
         }
 
-        for payload in Self::padding_abis(entry_abis) {
+        for payload in entry_payloads {
             let input = AptosFuzzerInput::new(payload);
             let _ = state.corpus.add(Testcase::new(input));
         }
 
+        if let Some(script_input) = Self::make_empty_script_seed(state.aptos_state()) {
+            let _ = state.corpus.add(Testcase::new(script_input));
+        }
         state
     }
 
@@ -246,6 +314,17 @@ impl AptosFuzzerState {
 
     pub fn target_modules(&self) -> &[ModuleId] {
         &self.target_modules
+    }
+
+    pub fn public_functions(&self) -> &[PublicFunctionTarget] {
+        &self.public_functions
+    }
+
+    pub fn public_function(&self, module_id: &ModuleId, name: &Identifier) -> Option<&PublicFunctionTarget> {
+        let key = Self::function_key(module_id, name);
+        self.function_lookup
+            .get(&key)
+            .and_then(|idx| self.public_functions.get(*idx))
     }
 
     pub fn set_static_findings(&mut self, findings: Vec<StaticAnalysisFinding>) {
@@ -419,114 +498,206 @@ impl HasStartTime for AptosFuzzerState {
 }
 
 impl AptosFuzzerState {
-    fn load_abis_from_path(path: Option<PathBuf>) -> Vec<EntryFunctionABI> {
-        let Some(path) = path else {
-            return Vec::new();
-        };
-
-        let mut paths = Vec::new();
-        let mut abis = Vec::new();
-        Self::collect_abis(path.as_path(), &mut paths, &mut abis);
-        abis
+    fn make_empty_script_seed(state: &AptosCustomState) -> Option<AptosFuzzerInput> {
+        let sequence = ScriptSequence::new();
+        compile_sequence(&sequence, state.module_bytes())
+            .map(|script| AptosFuzzerInput::with_script(TransactionPayload::Script(script), sequence))
     }
 
-    fn collect_abis(path: &Path, paths: &mut Vec<PathBuf>, abis: &mut Vec<EntryFunctionABI>) {
-        if path.is_dir() {
-            let read_dir = match fs::read_dir(path) {
-                Ok(rd) => rd,
-                Err(_) => return,
+    fn load_modules_from_path(path: &Path) -> Vec<LoadedModule> {
+        let mut files = Vec::new();
+        Self::collect_module_files(path, &mut files);
+        files.sort();
+
+        let mut loaded = Vec::new();
+        let mut seen = HashSet::new();
+        for file in files {
+            let bytes = match fs::read(&file) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    eprintln!("[aptos-fuzzer] failed to read module {}: {err}", file.display());
+                    continue;
+                }
             };
-            for entry in read_dir {
-                match entry {
-                    Ok(dir_entry) => Self::collect_abis(&dir_entry.path(), paths, abis),
-                    Err(err) => eprintln!("[aptos-fuzzer] failed to read entry in {}: {err}", path.display()),
+            let module = match CompiledModule::deserialize(bytes.as_slice()) {
+                Ok(module) => module,
+                Err(err) => {
+                    eprintln!("[aptos-fuzzer] failed to deserialize module {}: {err}", file.display());
+                    continue;
+                }
+            };
+            let module_id = module.self_id();
+            if seen.insert(module_id.clone()) {
+                loaded.push(LoadedModule {
+                    module_id,
+                    module,
+                    bytes,
+                });
+            }
+        }
+        loaded
+    }
+
+    fn collect_module_files(path: &Path, files: &mut Vec<PathBuf>) {
+        if Self::is_dependency_path(path) {
+            return;
+        }
+        if path.is_dir() {
+            let entries = match fs::read_dir(path) {
+                Ok(entries) => entries,
+                Err(err) => {
+                    eprintln!("[aptos-fuzzer] failed to list directory {}: {err}", path.display());
+                    return;
+                }
+            };
+            for entry in entries {
+                if let Ok(dir_entry) = entry {
+                    Self::collect_module_files(&dir_entry.path(), files);
                 }
             }
             return;
         }
 
-        if path.extension().map(|ext| ext != "abi").unwrap_or(true) {
-            return;
-        }
-
-        let bytes = match fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                eprintln!("[aptos-fuzzer] failed to read ABI file {}: {err}", path.display());
-                return;
-            }
-        };
-        // Try to decode as EntryABI first (new format from aptos move compile)
-        match bcs::from_bytes::<EntryABI>(&bytes) {
-            Ok(entry_abi) => {
-                if let EntryABI::EntryFunction(abi) = entry_abi {
-                    paths.push(path.to_path_buf());
-                    abis.push(abi);
-                }
-            }
-            Err(_) => {
-                // Fallback: try to decode as EntryFunctionABI directly (legacy format)
-                if let Ok(abi) = bcs::from_bytes::<EntryFunctionABI>(&bytes) {
-                    paths.push(path.to_path_buf());
-                    abis.push(abi);
-                }
-            }
+        if path.extension().map(|ext| ext == "mv").unwrap_or(false) {
+            files.push(path.to_path_buf());
         }
     }
 
-    fn padding_abis(abis: Vec<EntryFunctionABI>) -> Vec<TransactionPayload> {
-        let mut payloads = Vec::new();
+    fn is_dependency_path(path: &Path) -> bool {
+        path.components()
+            .any(|component| matches!(component, Component::Normal(name) if name.to_str() == Some("dependencies")))
+    }
 
-        for abi in abis {
-            if !abi.ty_args().is_empty() {
+    fn extract_public_functions(module_id: &ModuleId, module: &CompiledModule) -> Vec<PublicFunctionTarget> {
+        let mut functions = Vec::new();
+        for func_def in &module.function_defs {
+            if func_def.visibility != Visibility::Public {
+                continue;
+            }
+            let handle = module.function_handle_at(func_def.function);
+            if !handle.type_parameters.is_empty() {
                 continue;
             }
 
-            let identifier = match Identifier::new(abi.name()) {
-                Ok(id) => id,
-                Err(_) => continue,
+            let params_sig = module.signature_at(handle.parameters);
+            let parameters = match Self::parameters_from_signature(module, &params_sig.0) {
+                Some(params) => params,
+                None => continue,
             };
 
-            let mut arg_bytes = Vec::new();
-            let mut unsupported = false;
+            let returns_sig = module.signature_at(handle.return_);
+            let return_types = match Self::signature_tokens_to_typetags(module, &returns_sig.0) {
+                Some(types) => types,
+                None => continue,
+            };
 
-            for arg in abi.args() {
-                match Self::default_arg_bytes(arg.type_tag()) {
-                    Some(bytes) => arg_bytes.push(bytes),
-                    None => {
-                        unsupported = true;
-                        eprintln!(
-                            "[aptos-fuzzer] skipping {}::{}: unsupported argument type {:?}",
-                            abi.module_name(),
-                            abi.name(),
-                            arg.type_tag()
-                        );
-                        break;
+            let name = module.identifier_at(handle.name).to_owned();
+            functions.push(PublicFunctionTarget {
+                module_id: module_id.clone(),
+                name,
+                parameters,
+                return_types,
+                is_entry: func_def.is_entry,
+            });
+        }
+        functions
+    }
+
+    fn parameters_from_signature(module: &CompiledModule, tokens: &[SignatureToken]) -> Option<Vec<FunctionParameter>> {
+        let mut params = Vec::new();
+        for token in tokens {
+            match token {
+                SignatureToken::Signer => params.push(FunctionParameter::Signer),
+                SignatureToken::Reference(inner) | SignatureToken::MutableReference(inner) => {
+                    if matches!(inner.as_ref(), SignatureToken::Signer) {
+                        params.push(FunctionParameter::Signer);
+                    } else {
+                        return None;
                     }
                 }
-            }
-
-            if unsupported {
-                continue;
-            }
-
-            while arg_bytes.len() < abi.args().len() {
-                // Fallback to empty vector<u8> if some type was not covered
-                if let Ok(bytes) = bcs::to_bytes::<Vec<u8>>(&Vec::new()) {
-                    arg_bytes.push(bytes);
-                } else {
-                    break;
+                _ => {
+                    let ty = Self::signature_token_to_type_tag(module, token)?;
+                    params.push(FunctionParameter::Value(ty));
                 }
             }
-
-            let entry = AptosEntryFunction::new(abi.module_name().clone(), identifier, Vec::new(), arg_bytes);
-            payloads.push(TransactionPayload::EntryFunction(entry));
         }
-
-        payloads
+        Some(params)
     }
 
-    fn default_arg_bytes(type_tag: &TypeTag) -> Option<Vec<u8>> {
+    fn signature_tokens_to_typetags(module: &CompiledModule, tokens: &[SignatureToken]) -> Option<Vec<TypeTag>> {
+        tokens
+            .iter()
+            .map(|token| Self::signature_token_to_type_tag(module, token))
+            .collect()
+    }
+
+    fn signature_token_to_type_tag(module: &CompiledModule, token: &SignatureToken) -> Option<TypeTag> {
+        Some(match token {
+            SignatureToken::Bool => TypeTag::Bool,
+            SignatureToken::U8 => TypeTag::U8,
+            SignatureToken::U16 => TypeTag::U16,
+            SignatureToken::U32 => TypeTag::U32,
+            SignatureToken::U64 => TypeTag::U64,
+            SignatureToken::U128 => TypeTag::U128,
+            SignatureToken::U256 => TypeTag::U256,
+            SignatureToken::Address => TypeTag::Address,
+            SignatureToken::Signer => TypeTag::Signer,
+            SignatureToken::Vector(inner) => {
+                TypeTag::Vector(Box::new(Self::signature_token_to_type_tag(module, inner)?))
+            }
+            SignatureToken::Struct(handle_idx) => {
+                TypeTag::Struct(Box::new(Self::struct_tag_from_handle(module, *handle_idx, &[])?))
+            }
+            SignatureToken::StructInstantiation(handle_idx, tys) => {
+                let type_args = tys
+                    .iter()
+                    .map(|inner| Self::signature_token_to_type_tag(module, inner))
+                    .collect::<Option<Vec<_>>>()?;
+                TypeTag::Struct(Box::new(Self::struct_tag_from_handle(module, *handle_idx, &type_args)?))
+            }
+            _ => return None,
+        })
+    }
+
+    fn struct_tag_from_handle(
+        module: &CompiledModule,
+        handle_idx: StructHandleIndex,
+        type_args: &[TypeTag],
+    ) -> Option<StructTag> {
+        let handle = module.struct_handle_at(handle_idx);
+        if !handle.type_parameters.is_empty() && handle.type_parameters.len() != type_args.len() {
+            return None;
+        }
+        let module_handle = module.module_handle_at(handle.module);
+        let address = *module.address_identifier_at(module_handle.address);
+        let module_name = module.identifier_at(module_handle.name).to_owned();
+        let struct_name = module.identifier_at(handle.name).to_owned();
+        Some(StructTag {
+            address,
+            module: module_name,
+            name: struct_name,
+            type_args: type_args.to_vec(),
+        })
+    }
+
+    fn entry_payload_from_function(function: &PublicFunctionTarget) -> Option<TransactionPayload> {
+        let mut args = Vec::new();
+        for param in function.parameters() {
+            if let FunctionParameter::Value(tag) = param {
+                let bytes = Self::default_arg_bytes(tag)?;
+                args.push(bytes);
+            }
+        }
+
+        let entry = AptosEntryFunction::new(function.module_id().clone(), function.name().clone(), Vec::new(), args);
+        Some(TransactionPayload::EntryFunction(entry))
+    }
+
+    fn function_key(module_id: &ModuleId, name: &Identifier) -> String {
+        format!("{}::{}", module_id, name)
+    }
+
+    pub(crate) fn default_arg_bytes(type_tag: &TypeTag) -> Option<Vec<u8>> {
         match type_tag {
             TypeTag::Bool => bcs::to_bytes(&false).ok(),
             TypeTag::U8 => bcs::to_bytes(&0u8).ok(),
@@ -549,22 +720,5 @@ impl AptosFuzzerState {
             },
             _ => None,
         }
-    }
-
-    fn load_module_from_path(path: Option<PathBuf>) -> Option<(ModuleId, Vec<u8>)> {
-        let path = path?;
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(_) => return None,
-        };
-
-        let module = match CompiledModule::deserialize(bytes.as_slice()) {
-            Ok(module) => module,
-            Err(_) => return None,
-        };
-
-        let module_id = module.self_id();
-
-        Some((module_id, bytes))
     }
 }

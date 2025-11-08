@@ -1,5 +1,6 @@
 use std::marker::PhantomData;
 
+use aptos_move_core_types::account_address::AccountAddress;
 use aptos_move_core_types::vm_status::{StatusCode, VMStatus};
 use aptos_types::transaction::{ExecutionStatus, TransactionPayload, TransactionStatus};
 use aptos_vm::aptos_vm::ExecOutcomeKind;
@@ -105,6 +106,7 @@ impl<EM, Z> AptosMoveExecutor<EM, Z> {
                     sender,
                     &mut self.symbolic_tracer,
                 );
+                // println!("result: {:?}", result);
                 self.pending_runtime_issues = self.symbolic_tracer.take_issues();
                 let shift_losses: Vec<bool> = shifts.iter().map(|ev| ev.lost_high_bits).collect();
 
@@ -154,13 +156,14 @@ impl<EM, Z> Executor<EM, AptosFuzzerInput, AptosFuzzerState, Z> for AptosMoveExe
         input: &AptosFuzzerInput,
     ) -> Result<ExitKind, libafl::Error> {
         state.clear_current_execution_path();
+        let default_sender = Some(AccountAddress::ONE);
         let (result, outcome, pcs, shift_losses) =
-            self.execute_transaction(input.payload().clone(), state.aptos_state(), None);
+            self.execute_transaction(input.payload().clone(), state.aptos_state(), default_sender);
         let runtime_issues = std::mem::take(&mut self.pending_runtime_issues);
         let has_runtime_issue = !runtime_issues.is_empty();
         if has_runtime_issue {
             for issue in &runtime_issues {
-                warn!(
+                println!(
                     "Runtime issue detected: {} ({}::{} @ pc {})",
                     issue.message, issue.module, issue.function, issue.pc
                 );

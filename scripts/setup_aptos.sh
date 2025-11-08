@@ -119,56 +119,19 @@ if [[ ! -d "build" ]]; then
 fi
 
 echo "[+] Step 3: Detecting artifact paths..."
-
-# Detect module name from build artifacts
 BUILD_DIR="$CONTRACT_DIR/build"
 if [[ ! -d "$BUILD_DIR" ]]; then
     echo "[-] Error: Build directory not found: $BUILD_DIR"
     exit 1
 fi
 
-# Find all .mv files in bytecode_modules (excluding dependencies)
-mapfile -t MODULE_FILES < <(find "$BUILD_DIR" -path "*/bytecode_modules/*.mv" -not -path "*/dependencies/*" | sort)
-if [[ ${#MODULE_FILES[@]} -eq 0 ]]; then
-    echo "[-] Error: No module files found in $BUILD_DIR"
-    exit 1
-fi
+MODULES_DIR="$BUILD_DIR"
+echo "[*] Using modules directory: $MODULES_DIR"
 
-# Find the ABI directory
-ABI_PATH=$(find "$BUILD_DIR" -type d -name "abis" -not -path "*/dependencies/*" | head -n 1)
-if [[ -z "$ABI_PATH" ]]; then
-    echo "[-] Warning: No ABI directory found in $BUILD_DIR; fuzzing will be skipped."
-fi
-
-echo "[*] Found ${#MODULE_FILES[@]} module(s)" 
-echo "[*] ABI path: ${ABI_PATH:-<none>}"
-
-# Verify ABI path exists when provided
-if [[ -n "$ABI_PATH" && ! -d "$ABI_PATH" ]]; then
-    echo "[-] Warning: ABI directory path $ABI_PATH is not accessible; skipping fuzzing."
-    ABI_PATH=""
-fi
-
-echo "[+] Step 4: Running libafl-aptos fuzzer for each module..."
+echo "[+] Step 4: Running libafl-aptos fuzzer..."
 cd "$PROJECT_ROOT"
-
-for MODULE_PATH in "${MODULE_FILES[@]}"; do
-    if [[ ! -f "$MODULE_PATH" ]]; then
-        echo "[-] Warning: Skipping missing module file $MODULE_PATH"
-        continue
-    fi
-
-    echo ""
-    echo "[*] Fuzzing module: $MODULE_PATH"
-
-    if [[ -z "$ABI_PATH" ]]; then
-        echo "[*] Command: $LIBAFL_APTOS_BIN --module-path \"$MODULE_PATH\" --timeout $TIMEOUT_DURATION"
-        "$LIBAFL_APTOS_BIN" --module-path "$MODULE_PATH" --timeout "$TIMEOUT_DURATION"
-    else
-        echo "[*] Command: $LIBAFL_APTOS_BIN --module-path \"$MODULE_PATH\" --abi-path \"$ABI_PATH\" --timeout $TIMEOUT_DURATION"
-        "$LIBAFL_APTOS_BIN" --module-path "$MODULE_PATH" --abi-path "$ABI_PATH" --timeout "$TIMEOUT_DURATION"
-    fi
-done
+echo "[*] Command: $LIBAFL_APTOS_BIN --modules-dir \"$MODULES_DIR\" --timeout $TIMEOUT_DURATION"
+"$LIBAFL_APTOS_BIN" --modules-dir "$MODULES_DIR" --timeout "$TIMEOUT_DURATION"
 
 echo ""
-echo "[+] Fuzzing completed for all modules"
+echo "[+] Fuzzing completed"
